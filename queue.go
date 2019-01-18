@@ -7,8 +7,11 @@ import (
 	"time"
 )
 
+const DebugPrefix = "[queue-debug]"
+
 type Config struct {
 	MaxWorkers int
+	TimeOut    int
 }
 
 type Job interface {
@@ -49,13 +52,13 @@ func (q *Queue) Start() {
 	q.Queued = mapset.NewSet()
 
 	// Now, create all of our workers.
-	fmt.Println("Starting", q.Config.MaxWorkers, "workers")
+	fmt.Println(DebugPrefix, "Starting", q.Config.MaxWorkers, "workers")
 	for i := 0; i < q.Config.MaxWorkers; i++ {
 		worker := NewWorker(i+1, q.WorkerQueue, q.Queued, q)
 		worker.Start()
 		q.Workers[i] = worker
 	}
-	fmt.Println("Done starting workers")
+	fmt.Println(DebugPrefix, "Done starting workers")
 
 	go func() {
 		for {
@@ -63,13 +66,12 @@ func (q *Queue) Start() {
 			case work := <-q.WorkQueue:
 				go func() {
 					worker := <-q.WorkerQueue
-
 					worker <- work
 				}()
 			case <-q.QuitChan:
 				for {
 					if q.Queued.Cardinality() == 0 {
-						fmt.Println("Closing", len(q.Workers), "workers")
+						fmt.Println(DebugPrefix, "Closing", len(q.Workers), "workers")
 						for _, w := range q.Workers {
 							w.QuitChan <- true
 						}
@@ -88,7 +90,7 @@ func (q *Queue) Start() {
 func (q *Queue) Stop() {
 	q.stopped.Store(true)
 
-	fmt.Println("Stopping queue")
+	fmt.Println(DebugPrefix, "Stopping queue")
 	q.QuitChan <- true
 	//for _, w := range q.Workers {
 	//	w.Stop()
@@ -150,7 +152,7 @@ func (w *Worker) Start() {
 			case job := <-w.Work:
 				// Receive a work request.
 				func() {
-					fmt.Printf("%s [Worker %3d] Received job %s\n", time.Now(), w.ID, job.Key())
+					fmt.Printf("%s %s [Worker %3d] Received job %s\n", DebugPrefix, time.Now(), w.ID, job.Key())
 
 					// @todo
 					//defer common.TrackTime(time.Now(), finish)
@@ -158,13 +160,34 @@ func (w *Worker) Start() {
 					if job.ShouldWork() {
 						defer func(job Job, w *Worker) {
 							w.Queued.Remove(job.Key())
-							message := fmt.Sprintf("[Worker %3d] Finished job %s", w.ID, job.Key())
-							fmt.Println(time.Now(), message)
+							message := fmt.Sprintf("%s %s [Worker %3d] Finished job %s", DebugPrefix, time.Now(), w.ID, job.Key())
+							fmt.Println(message)
 						}(job, w)
 
-						job.Work()
+						done := make(chan bool, 1)
+
+						go func(job *Job, done chan bool) {
+							(*job).Work()
+							done <- true
+
+						}(&job, done)
+
+						// Don't ever time out
+						if w.Queue.Config.TimeOut == 0 {
+							<-done
+							return
+						}
+
+						// Call with timeout
+						select {
+						case <-done:
+						case <-time.After(time.Duration(w.Queue.Config.TimeOut) * time.Second):
+							// Put back
+							w.Queue.WorkQueue <- job
+							fmt.Printf("%s %s [Worder %3d] Job %s timed out\n", DebugPrefix, time.Now(), w.ID, job.Key())
+						}
 					} else {
-						fmt.Printf("%s [Worker %3d] Job %s should not run. Putting back \n", time.Now(), w.ID, job.Key())
+						fmt.Printf("%s %s [Worker %3d] Job %s should not run. Putting back \n", DebugPrefix, time.Now(), w.ID, job.Key())
 						go func(job Job, w *Worker) {
 							time.Sleep(job.Delay())
 							w.Queue.WorkQueue <- job
@@ -173,7 +196,7 @@ func (w *Worker) Start() {
 				}()
 			case <-w.QuitChan:
 				// We have been asked to stop.
-				fmt.Printf("%s [Worker %3d] Stopping\n", time.Now(), w.ID)
+				fmt.Printf("%s %s [Worker %3d] Stopping\n", DebugPrefix, time.Now(), w.ID)
 				return
 			}
 		}
