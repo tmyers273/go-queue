@@ -8,10 +8,12 @@ import (
 )
 
 const DebugPrefix = "[queue-debug]"
+const DefaultMaxJobs = 50000
 
 type Config struct {
 	MaxWorkers int
 	TimeOut    int
+	MaxJobs    int
 }
 
 type Job interface {
@@ -35,6 +37,14 @@ type Queue struct {
 	stopped atomic.Bool
 }
 
+func (c *Config) GetMaxJobs() int {
+	if c.MaxJobs != 0 {
+		return c.MaxJobs
+	}
+
+	return DefaultMaxJobs
+}
+
 func (q *Queue) Len() int {
 	return q.Queued.Cardinality()
 }
@@ -42,7 +52,7 @@ func (q *Queue) Len() int {
 func (q *Queue) Start() {
 	// First, initialize the channel we are going to but the workers' work channels into.
 	q.WorkerQueue = make(chan chan Job, q.Config.MaxWorkers)
-	q.WorkQueue = make(chan Job)
+	q.WorkQueue = make(chan Job, q.Config.GetMaxJobs())
 	q.Workers = make([]Worker, q.Config.MaxWorkers)
 	//q.Empty = make(chan bool)
 	q.Done = make(chan bool)
@@ -99,14 +109,25 @@ func (q *Queue) Stop() {
 	//close(q.WorkerQueue)
 }
 
+func (q *Queue) enqueue(job Job) bool {
+	select {
+	case q.WorkQueue <- job:
+		return true
+	default:
+		fmt.Printf("%s %s Failed to enqueue job %s\n", DebugPrefix, time.Now(), job.Key())
+		return false
+	}
+}
+
 func (q *Queue) Push(job Job) bool {
 	key := job.Key()
 	isRunning := q.Queued.Contains(key)
 
 	if !isRunning && !q.stopped.Load() {
 		q.Queued.Add(key)
-		q.WorkQueue <- job
-		return true
+		success := q.enqueue(job)
+
+		return success
 	}
 
 	return false
@@ -183,14 +204,14 @@ func (w *Worker) Start() {
 						case <-done:
 						case <-time.After(time.Duration(w.Queue.Config.TimeOut) * time.Second):
 							// Put back
-							w.Queue.WorkQueue <- job
-							fmt.Printf("%s %s [Worder %3d] Job %s timed out\n", DebugPrefix, time.Now(), w.ID, job.Key())
+							fmt.Printf("%s %s [Worder %3d] Job %s timed out. Putting back\n", DebugPrefix, time.Now(), w.ID, job.Key())
+							w.Queue.enqueue(job)
 						}
 					} else {
 						fmt.Printf("%s %s [Worker %3d] Job %s should not run. Putting back \n", DebugPrefix, time.Now(), w.ID, job.Key())
 						go func(job Job, w *Worker) {
 							time.Sleep(job.Delay())
-							w.Queue.WorkQueue <- job
+							w.Queue.enqueue(job)
 						}(job, w)
 					}
 				}()
