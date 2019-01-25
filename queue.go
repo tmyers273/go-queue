@@ -133,6 +133,10 @@ func (q *Queue) Push(job Job) bool {
 	return false
 }
 
+func (q *Queue) IsQueued(key string) bool {
+	return q.Queued.Contains(key)
+}
+
 // NewWorker creates, and returns a new Worker object. Its only argument
 // is a channel that the worker can add itself to whenever it is done its
 // work.
